@@ -262,7 +262,7 @@ def render_global(cfg):
     _, _, K = create_camera_sensor(width, height, 24)  # render as 24mm lens
 
     # renderer
-    renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K)
+    renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K, bin_size=0)
     # renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K, bin_size=0)
 
     # -- render mesh -- #
@@ -290,7 +290,8 @@ if __name__ == "__main__":
     data = load_data_dict(cfg)
 
     # ===== HMR4D ===== #
-    if not Path(paths.hmr4d_results).exists():
+
+    if not Path(paths.hmr4d_results+".pkl").exists():
         Log.info("[HMR4D] Predicting")
         model: DemoPL = hydra.utils.instantiate(cfg.model, _recursive_=False)
         model.load_pretrained_model(cfg.ckpt_path)
@@ -299,12 +300,58 @@ if __name__ == "__main__":
         pred = model.predict(data, static_cam=cfg.static_cam)
         pred = detach_to_cpu(pred)
         data_time = data["length"] / 30
-        Log.info(f"[HMR4D] Elapsed: {Log.sync_time() - tic:.2f}s for data-length={data_time:.1f}s")
+        Log.info(f"[HMR4D] Elapsed: {Log.sync_time() - tic:.2f}s for data-length={data_time:.1f}s saved to {paths.hmr4d_results}.pkl")
         torch.save(pred, paths.hmr4d_results)
 
+        pred_np = {}
+        pred_np['smpl_params_global'] = {}
+        pred_np['smpl_params_incam'] = {}
+        pred_np['smpl_params_global']['body_pose'] = pred['smpl_params_global']['body_pose'].cpu().numpy()
+        pred_np['smpl_params_global']['global_orient'] = pred['smpl_params_global']['global_orient'].cpu().numpy()
+        pred_np['smpl_params_global']['transl'] = pred['smpl_params_global']['transl'].cpu().numpy()
+        pred_np['smpl_params_global']['betas'] = pred['smpl_params_global']['betas'].cpu().numpy()
+        smpl_poses = np.concatenate([
+            pred['smpl_params_global']['global_orient'].cpu().numpy(),
+            pred['smpl_params_global']['body_pose'].cpu().numpy()
+        ], axis=1)  # (N, 72)
+        num_frames, current_joints = smpl_poses.shape[0], smpl_poses.shape[1] // 3
+
+        # Check if the number of joints is less than 24
+        target_joints = 24
+        if current_joints < target_joints:
+            print(f"Current joints: {current_joints}, adding {target_joints - current_joints} missing joints...")
+
+            # add missing joints
+            additional_joints = np.zeros((num_frames, (target_joints - current_joints) * 3))
+
+            # concatenate additional joints
+            smpl_poses = np.concatenate([smpl_poses, additional_joints], axis=1)  # (N, 72)
+        has_nan = np.isnan(smpl_poses).any()
+        all_zero_rows = np.all(smpl_poses == 0, axis=1)
+        print(f"NaN in smpl_poses: {has_nan}")
+        print(f"Rows with all zeros: {np.sum(all_zero_rows)}")
+
+        # Replace NaN values with 0
+        smpl_poses = np.nan_to_num(smpl_poses, nan=0.0, posinf=0.0, neginf=0.0)
+        if np.any(all_zero_rows):
+            smpl_poses[all_zero_rows] = 0.001
+
+        pred_np['smpl_poses'] = smpl_poses
+        pred_np['smpl_trans'] = pred['smpl_params_global']['transl'].cpu().numpy()  # (N, 3)
+        pred_np['smpl_scaling'] = 1.0
+
+        pred_np['smpl_params_incam']['body_pose'] = pred['smpl_params_global']['body_pose'].cpu().numpy()
+        pred_np['smpl_params_incam']['global_orient'] = pred['smpl_params_global']['global_orient'].cpu().numpy()
+        pred_np['smpl_params_incam']['transl'] = pred['smpl_params_global']['transl'].cpu().numpy()
+        pred_np['smpl_params_incam']['betas'] = pred['smpl_params_global']['betas'].cpu().numpy()
+        import pickle
+        with open(paths.hmr4d_results+".pkl", 'wb') as handle:
+            pickle.dump(pred_np, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+
     # ===== Render ===== #
-    render_incam(cfg)
-    render_global(cfg)
-    if not Path(paths.incam_global_horiz_video).exists():
-        Log.info("[Merge Videos]")
-        merge_videos_horizontal([paths.incam_video, paths.global_video], paths.incam_global_horiz_video)
+    # render_incam(cfg)
+    # render_global(cfg)
+    # if not Path(paths.incam_global_horiz_video).exists():
+    #     Log.info("[Merge Videos]")
+    #     merge_videos_horizontal([paths.incam_video, paths.global_video], paths.incam_global_horiz_video)
