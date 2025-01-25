@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D人体姿态估计服务</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css">
+    <style>
+        :root {
+            --bs-success-rgb: 25, 135, 84;
+            --bs-processing-rgb: 255, 193, 7;
+        }
+
+        .task-card {
+            transition: transform 0.2s, box-shadow 0.2s;
+            min-height: 120px;
+        }
+
+        .task-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+        }
+
+        .status-badge {
+            font-size: 0.75rem;
+            padding: 0.35em 0.65em;
+        }
+
+        .badge-queued { background-color: #6c757d; }
+        .badge-processing { background-color: #ffc107; color: #000; }
+        .badge-completed { background-color: #198754; }
+        .badge-failed { background-color: #dc3545; }
+
+        #uploadProgress {
+            height: 8px;
+            transition: opacity 0.3s;
+        }
+
+        .preview-thumbnail {
+            max-width: 120px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container py-4">
+        <!-- 任务创建区 -->
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <h2 class="mb-4"><i class="bi bi-cloud-upload me-2"></i>新建处理任务</h2>
+                
+                <form id="taskForm" class="needs-validation" novalidate>
+                    <!-- 视频上传 -->
+                    <div class="mb-4">
+                        <label for="videoInput" class="form-label">选择视频文件</label>
+                        <div class="input-group">
+                            <input type="file" class="form-control" id="videoInput" 
+                                   accept="video/mp4,video/quicktime" required>
+                            <button class="btn btn-outline-secondary" type="button" 
+                                    onclick="document.getElementById('videoInput').value=''">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+                        <div class="form-text">支持MP4/MOV格式，建议时长小于5分钟</div>
+                        <div class="mt-2" id="videoPreview"></div>
+                    </div>
+
+                    <!-- 配置参数 -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" 
+                                       id="staticCamSwitch" checked>
+                                <label class="form-check-label" for="staticCamSwitch">
+                                    静态相机模式
+                                </label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="fpsInput" class="form-label">输出帧率 (FPS)</label>
+                            <input type="number" class="form-control" id="fpsInput" 
+                                   min="15" max="60" value="30" required>
+                        </div>
+                    </div>
+
+                    <!-- 提交按钮 -->
+                    <button type="submit" class="btn btn-primary w-100" id="submitBtn">
+                        <span class="submit-text">开始处理</span>
+                        <div class="spinner-border spinner-border-sm d-none" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </button>
+                    
+                    <!-- 上传进度 -->
+                    <div class="progress mt-3 d-none" id="uploadProgress">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             style="width: 0%"></div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 任务列表区 -->
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h2 class="mb-0"><i class="bi bi-list-task me-2"></i>任务队列</h2>
+                    <div>
+                        <button class="btn btn-outline-secondary" onclick="loadTasks()">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div id="taskList" class="row g-3">
+                    <!-- 任务卡片动态加载 -->
+                    <div class="col-12">
+                        <div class="text-center text-muted py-3" id="loadingIndicator">
+                            <div class="spinner-border spinner-border-sm me-2"></div>
+                            加载任务列表中...
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 任务详情模态框 -->
+    <div class="modal fade" id="detailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">任务详情</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <dl class="row">
+                        <dt class="col-sm-3">任务ID</dt>
+                        <dd class="col-sm-9"><code id="detailId">-</code></dd>
+
+                        <dt class="col-sm-3">当前状态</dt>
+                        <dd class="col-sm-9">
+                            <span class="badge" id="detailStatus">-</span>
+                        </dd>
+
+                        <dt class="col-sm-3">创建时间</dt>
+                        <dd class="col-sm-9"><span id="detailCreated">-</span></dd>
+
+                        <dt class="col-sm-3">处理结果</dt>
+                        <dd class="col-sm-9" id="detailResult">
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="text-muted">无</span>
+                            </div>
+                        </dd>
+
+                        <dt class="col-sm-3">错误信息</dt>
+                        <dd class="col-sm-9">
+                            <code class="text-danger" id="detailError">-</code>
+                        </dd>
+                    </dl>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // 初始化配置
+        const API_BASE = 'http://localhost:7890';  // 根据实际部署地址修改
+
+        // 页面加载完成初始化
+        $(document).ready(() => {
+            initVideoPreview();
+            loadTasks();
+        });
+
+        // 初始化视频预览
+        function initVideoPreview() {
+            const $videoInput = $('#videoInput');
+            $videoInput.on('change', function(e) {
+                const file = this.files[0];
+                if (!file) return;
+
+                const $preview = $('#videoPreview').empty();
+                if (file.type.startsWith('video/')) {
+                    const url = URL.createObjectURL(file);
+                    $preview.html(`
+                        <video class="preview-thumbnail" controls>
+                            <source src="${url}" type="${file.type}">
+                            您的浏览器不支持视频预览
+                        </video>
+                    `);
+                }
+            });
+        }
+
+        // 表单提交处理
+        $('#taskForm').submit(async function(e) {
+            e.preventDefault();
+            const $form = $(this);
+            const $submitBtn = $('#submitBtn');
+            const $progress = $('#uploadProgress');
+            const formData = new FormData();
+
+            // 验证表单
+            if (!this.checkValidity()) {
+                this.classList.add('was-validated');
+                return;
+            }
+
+            // 准备数据
+            const videoFile = $('#videoInput')[0].files[0];
+            formData.append('video', videoFile);
+            formData.append('static_cam', $('#staticCamSwitch').prop('checked'));
+            formData.append('fps', $('#fpsInput').val());
+
+            try {
+                // 禁用按钮显示加载状态
+                $submitBtn.prop('disabled', true);
+                $submitBtn.find('.spinner-border').removeClass('d-none');
+                $submitBtn.find('.submit-text').text('处理中...');
+                $progress.parent().removeClass('d-none');
+
+                // 发送请求
+                const response = await fetch(`${API_BASE}/tasks`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                // 处理响应
+                if (!response.ok) {
+                    const error = await response.text();
+                    throw new Error(`[${response.status}] ${error}`);
+                }
+
+                const result = await response.json();
+                showToast('success', '任务创建成功', `任务ID: ${result.task_id}`);
+                await loadTasks();
+            } catch (error) {
+                console.error('提交失败:', error);
+                showToast('danger', '提交失败', error.message);
+            } finally {
+                // 重置状态
+                $submitBtn.prop('disabled', false);
+                $submitBtn.find('.spinner-border').addClass('d-none');
+                $submitBtn.find('.submit-text').text('开始处理');
+                $progress.parent().addClass('d-none');
+                $progress.find('.progress-bar').css('width', '0%');
+                $form.removeClass('was-validated');
+            }
+        });
+
+        // 加载任务列表
+        async function loadTasks() {
+            try {
+                $('#loadingIndicator').show();
+                const response = await fetch(`${API_BASE}/tasks`);
+                if (!response.ok) throw new Error('加载失败');
+                
+                const tasks = await response.json();
+                renderTasks(tasks);
+            } catch (error) {
+                showToast('danger', '加载失败', error.message);
+            } finally {
+                $('#loadingIndicator').hide();
+            }
+        }
+        // 添加下载函数
+        function downloadResult(taskId) {
+            window.open(`${API_BASE}/tasks/${taskId}/download`);
+        }
+
+        // 修改任务渲染逻辑
+        function renderTasks(tasks) {
+            const $container = $('#taskList').empty();
+            
+            tasks.forEach(task => {
+                $container.append(`
+                    <div class="col-12">
+                        <div class="card task-card">
+                            <div class="card-body">
+                                <button class="btn btn-sm btn-success download-btn" 
+                                        data-taskid="${task.id}">
+                                    下载结果
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `);
+            });
+        }
+
+        // 绑定下载事件
+        $(document).on('click', '.download-btn', function() {
+            const taskId = $(this).data('taskid');
+            downloadResult(taskId);
+        });
+        // 渲染任务列表
+        function renderTasks(tasks) {
+            const $container = $('#taskList').empty();
+
+            if (tasks.length === 0) {
+                $container.html(`
+                    <div class="col-12">
+                        <div class="text-center text-muted py-4">
+                            <i class="bi bi-inbox fs-1"></i>
+                            <div class="mt-2">暂无处理任务</div>
+                        </div>
+                    </div>
+                `);
+                return;
+            }
+
+            tasks.forEach(task => {
+                const statusClass = {
+                    queued: 'badge-queued',
+                    processing: 'badge-processing',
+                    completed: 'badge-completed',
+                    failed: 'badge-failed'
+                }[task.status];
+
+                $container.append(`
+                    <div class="col-12">
+                        <div class="card task-card mb-2" data-id="${task.id}">
+                            <div class="card-body d-flex align-items-center">
+                                <div class="flex-grow-1">
+                                    <div class="d-flex align-items-center gap-2 mb-2">
+                                        <span class="badge ${statusClass} status-badge">${task.status}</span>
+                                        <small class="text-muted">#${task.id.slice(0, 6)}</small>
+                                    </div>
+                                    <div class="text-muted small">
+                                        <i class="bi bi-clock me-1"></i>
+                                        ${new Date(task.created_at * 1000).toLocaleString()}
+                                    </div>
+                                </div>
+                                ${task.result_url ? `
+                                <button class="btn btn-sm btn-outline-success" 
+                                    onclick="downloadResult('${task.id}')">
+                                    <i class="bi bi-download me-1"></i>下载
+                                </button>` : ''}
+                                <button class="btn btn-sm btn-outline-secondary ms-2" 
+                                    onclick="showTaskDetail('${task.id}')">
+                                    <i class="bi bi-info-circle"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `);
+            });
+        }
+
+        // 显示任务详情
+        async function showTaskDetail(taskId) {
+            try {
+                const response = await fetch(`${API_BASE}/tasks/${taskId}`);
+                if (!response.ok) throw new Error('获取详情失败');
+                
+                const task = await response.json();
+                $('#detailId').text(task.id);
+                $('#detailStatus')
+                    .removeClass()
+                    .addClass(`badge ${getStatusClass(task.status)}`)
+                    .text(task.status);
+                $('#detailCreated').text(new Date(task.created_at * 1000).toLocaleString());
+                $('#detailError').text(task.error || '无');
+                
+                if (task.bvh_path) {
+                    $('#detailResult').html(`
+                        <a href="${task.bvh_path}" class="btn btn-success btn-sm" download>
+                            <i class="bi bi-download me-1"></i>下载BVH文件
+                        </a>
+                    `);
+                } else {
+                    $('#detailResult').html('<span class="text-muted">无</span>');
+                }
+
+                new bootstrap.Modal('#detailModal').show();
+            } catch (error) {
+                showToast('danger', '获取详情失败', error.message);
+            }
+        }
+
+        // 辅助函数
+        function getStatusClass(status) {
+            return {
+                queued: 'badge-queued',
+                processing: 'badge-processing',
+                completed: 'badge-completed',
+                failed: 'badge-failed'
+            }[status];
+        }
+
+        function showToast(type, title, message) {
+            const toast = $(`
+                <div class="toast align-items-center text-white bg-${type} border-0" role="alert">
+                    <div class="d-flex">
+                        <div class="toast-body">
+                            <strong>${title}</strong><br>${message}
+                        </div>
+                        <button type="button" class="btn-close btn-close-white me-2 m-auto" 
+                                data-bs-dismiss="toast"></button>
+                    </div>
+                </div>
+            `);
+            
+            $('#toastContainer').append(toast);
+            new bootstrap.Toast(toast[0], { autohide: true, delay: 5000 }).show();
+            setTimeout(() => toast.remove(), 6000);
+        }
+
+        // 初始化Toast容器
+        $(document.body).append('<div id="toastContainer" class="toast-container position-fixed bottom-0 end-0 p-3"></div>');
+    </script>
+</body>
+</html>

@@ -31,7 +31,7 @@ from hmr4d.utils.vis.renderer import Renderer, get_global_cameras_static, get_gr
 from tqdm import tqdm
 from hmr4d.utils.geo_transform import apply_T_on_points, compute_T_ayfz2ay
 from einops import einsum, rearrange
-
+from hmr4d.utils.bvh import bvh, quat
 
 CRF = 23  # 17 is lossless, every +6 halves the mp4 size
 
@@ -43,6 +43,8 @@ def parse_args_to_cfg():
     parser.add_argument("--output_root", type=str, default=None, help="by default to outputs/demo")
     parser.add_argument("-s", "--static_cam", action="store_true", help="If true, skip DPVO")
     parser.add_argument("--verbose", action="store_true", help="If true, draw intermediate results")
+    parser.add_argument("--fps", type=int, default=30, help="Output bvh fps")
+    parser.add_argument("--render", action="store_false", help="If true, render the results")
     args = parser.parse_args()
 
     # Input
@@ -279,6 +281,118 @@ def render_global(cfg):
     writer.close()
 
 
+def mirror_rot_trans(lrot, trans, names, parents):
+    joints_mirror = np.array([(
+        names.index("Left"+n[5:]) if n.startswith("Right") else (
+        names.index("Right"+n[4:]) if n.startswith("Left") else 
+        names.index(n))) for n in names])
+
+    mirror_pos = np.array([-1, 1, 1])
+    mirror_rot = np.array([1, 1, -1, -1])
+    grot = quat.fk_rot(lrot, parents)
+    trans_mirror = mirror_pos * trans
+    grot_mirror = mirror_rot * grot[:,joints_mirror]
+    
+    return quat.ik_rot(grot_mirror, parents), trans_mirror
+
+
+arp_maps_bones = [
+        "c_root_master.x",  # hips
+        "c_thigh_fk.l",     # thigh.L
+        "c_thigh_fk.r",     # thigh.R
+        "c_spine_01.x",     # spine
+        "c_leg_fk.l",       # shin.L
+        "c_leg_fk.r",       # shin.R
+        "chest",           # chest (This one doesn't have a direct match in your list, keeping original)
+        "c_foot_fk.l",      # foot.L
+        "c_foot_fk.r",      # foot.R
+        "c_spine_02.x",    # chest.001
+        "toe.L",           # toe.L (This one doesn't have a direct match, keeping original)
+        "toe.R",           # toe.R (This one doesn't have a direct match, keeping original)
+        "c_neck.x",         # neck
+        "c_shoulder.l",     # shoulder.L
+        "c_shoulder.r",     # shoulder.R
+        "c_head.x",         # head
+        "c_arm_fk.l",       # upper_arm.L
+        "c_arm_fk.r",       # upper_arm.R
+        "c_forearm_fk.l",   # forearm.L
+        "c_forearm_fk.r",   # forearm.R
+        "c_hand_fk.l",      # hand.L
+        "c_hand_fk.r",      # hand.R
+        "Left_palm",       # Left_palm (This one doesn't have a direct match, keeping original)
+        "Right_palm",      # Right_palm (This one doesn't have a direct match, keeping original)
+    ]
+
+
+def load_model_offsets(offsets_path: str):
+    with open(offsets_path, "rb") as f:
+        datas = np.load(f)
+        return datas["offsets"], datas["parents"]
+
+
+def save_bvh(poses, output: str, mirror: bool,
+             fps=60) -> None:
+    names = arp_maps_bones
+
+    offsets, parents = load_model_offsets("inputs/model_offsets.npz")
+
+    scaling = None
+
+    rots = poses["smpl_poses"]  # (N, 72)
+    rots = rots.reshape(rots.shape[0], -1, 3)  # (N, 24, 3)
+    scaling = poses["smpl_scaling"]  # (1,)
+    trans = poses["smpl_trans"]  # (N, 3)
+
+    if scaling is not None:
+        trans /= scaling
+
+    # to quaternion
+    rots = quat.from_axis_angle(rots)
+
+    order = "zyx"
+    pos = offsets[None].repeat(len(rots), axis=0)
+    positions = pos.copy()
+
+    positions[:, 0] += trans * 100
+    rotations = np.degrees(quat.to_euler(rots, order=order))
+
+    bvh_data = {
+        "rotations": rotations,
+        "positions": positions,
+        "offsets": offsets,
+        "parents": parents,
+        "names": names,
+        "order": order,
+        "frametime": 1 / fps,
+    }
+
+    if not output.endswith(".bvh"):
+        output = output + ".bvh"
+
+    bvh.save(output, bvh_data)
+
+    if mirror:
+        rots_mirror, trans_mirror = mirror_rot_trans(
+                rots, trans, names, parents)
+        positions_mirror = pos.copy()
+        positions_mirror[:,0] += trans_mirror
+        rotations_mirror = np.degrees(
+            quat.to_euler(rots_mirror, order=order))
+
+        bvh_data = {
+            "rotations": rotations_mirror,
+            "positions": positions_mirror,
+            "offsets": offsets,
+            "parents": parents,
+            "names": names,
+            "order": order,
+            "frametime": 1 / fps,
+        }
+
+        output_mirror = output.split(".")[0] + "_mirror.bvh"
+        bvh.save(output_mirror, bvh_data)
+
+
 if __name__ == "__main__":
     cfg = parse_args_to_cfg()
     paths = cfg.paths
@@ -344,14 +458,15 @@ if __name__ == "__main__":
         pred_np['smpl_params_incam']['global_orient'] = pred['smpl_params_global']['global_orient'].cpu().numpy()
         pred_np['smpl_params_incam']['transl'] = pred['smpl_params_global']['transl'].cpu().numpy()
         pred_np['smpl_params_incam']['betas'] = pred['smpl_params_global']['betas'].cpu().numpy()
+        save_bvh(pred_np, paths.hmr4d_results+".bvh", mirror=True, fps=cfg.fps)
         import pickle
         with open(paths.hmr4d_results+".pkl", 'wb') as handle:
             pickle.dump(pred_np, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-
     # ===== Render ===== #
-    # render_incam(cfg)
-    # render_global(cfg)
-    # if not Path(paths.incam_global_horiz_video).exists():
-    #     Log.info("[Merge Videos]")
-    #     merge_videos_horizontal([paths.incam_video, paths.global_video], paths.incam_global_horiz_video)
+    if cfg.render:
+        render_incam(cfg)
+        render_global(cfg)
+        if not Path(paths.incam_global_horiz_video).exists():
+            Log.info("[Merge Videos]")
+            merge_videos_horizontal([paths.incam_video, paths.global_video], paths.incam_global_horiz_video)
